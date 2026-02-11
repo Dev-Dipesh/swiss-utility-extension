@@ -67,6 +67,8 @@
   let readerObserver = null;
   let readerRebuildTimer = null;
   const readerControls = {};
+  let suppressReaderObserver = false;
+  let lastReaderRebuildAt = 0;
 
   function log(...args) {
     console.log(PREFIX, ...args);
@@ -227,13 +229,49 @@
     clearTimeout(readerRebuildTimer);
     readerRebuildTimer = setTimeout(() => {
       if (!lastReadingModeEnabled) return;
+      if (isSelectionActiveInReader()) {
+        scheduleReaderRebuild();
+        return;
+      }
+      const now = Date.now();
+      if (now - lastReaderRebuildAt < 800) return;
+      lastReaderRebuildAt = now;
       buildReaderContent();
     }, 500);
   }
 
+  function isNodeWithin(node, root) {
+    if (!node || !root) return false;
+    return node === root || root.contains(node);
+  }
+
+  function isSelectionActiveInReader() {
+    const readerEl = document.getElementById(READER_ID);
+    if (!readerEl) return false;
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) return false;
+    if (selection.type !== "Range") return false;
+    const range = selection.getRangeAt(0);
+    const startInReader = isNodeWithin(range.startContainer, readerEl);
+    const endInReader = isNodeWithin(range.endContainer, readerEl);
+    return startInReader || endInReader;
+  }
+
+  function shouldIgnoreReaderMutation(mutations) {
+    const readerEl = document.getElementById(READER_ID);
+    const panelEl = panelHost;
+    return mutations.every((mutation) => {
+      const target = mutation.target;
+      if (isNodeWithin(target, readerEl) || isNodeWithin(target, panelEl)) return true;
+      return false;
+    });
+  }
+
   function startReaderObserver() {
     if (readerObserver) return;
-    readerObserver = new MutationObserver(() => {
+    readerObserver = new MutationObserver((mutations) => {
+      if (suppressReaderObserver) return;
+      if (shouldIgnoreReaderMutation(mutations)) return;
       scheduleReaderRebuild();
     });
     readerObserver.observe(document.body, { childList: true, subtree: true });
@@ -446,12 +484,16 @@
     const container = ensureReaderContainer();
     const source = pickReadingSource();
 
+    suppressReaderObserver = true;
     container.innerHTML = "";
 
     if (!source) {
       readerReady = false;
       document.documentElement.classList.remove("su-reader-ready");
       container.style.display = "none";
+      setTimeout(() => {
+        suppressReaderObserver = false;
+      }, 0);
       return;
     }
 
@@ -462,6 +504,9 @@
       readerReady = false;
       document.documentElement.classList.remove("su-reader-ready");
       container.style.display = "none";
+      setTimeout(() => {
+        suppressReaderObserver = false;
+      }, 0);
       return;
     }
 
@@ -469,6 +514,9 @@
     container.style.display = "block";
     document.documentElement.classList.add("su-reader-ready");
     readerReady = true;
+    setTimeout(() => {
+      suppressReaderObserver = false;
+    }, 0);
   }
 
   function setReadingModeEnabled(enabled) {
