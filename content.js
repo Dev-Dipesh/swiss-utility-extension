@@ -37,6 +37,9 @@
   let lastReadingModeEnabled = false;
   let panelVisible = false;
   let readerReady = false;
+  let panelHost = null;
+  let panelRoot = null;
+  let panelStyleEl = null;
 
   let siteSelectionMap = {};
   let siteReadingMap = {};
@@ -69,7 +72,14 @@
     console.log(PREFIX, ...args);
   }
 
+  function isExtensionContextValid() {
+    return Boolean(chrome?.runtime?.id);
+  }
+
   function sendMessage(type, payload = {}) {
+    if (!isExtensionContextValid()) {
+      return Promise.reject(new Error("Extension context invalidated"));
+    }
     return chrome.runtime.sendMessage({ type, payload });
   }
 
@@ -118,6 +128,19 @@
         line-height: var(--su-reader-line) !important;
         color: var(--su-reader-text) !important;
       }
+      html.su-reading-mode #${READER_ID} * {
+        font-family: inherit !important;
+        font-size: inherit !important;
+        line-height: inherit !important;
+      }
+      html.su-reading-mode #${READER_ID} h1,
+      html.su-reading-mode #${READER_ID} h2,
+      html.su-reading-mode #${READER_ID} h3,
+      html.su-reading-mode #${READER_ID} h4,
+      html.su-reading-mode #${READER_ID} h5,
+      html.su-reading-mode #${READER_ID} h6 {
+        line-height: 1.2 !important;
+      }
       html.su-reading-mode #${READER_ID} a {
         color: var(--su-reader-link) !important;
       }
@@ -150,11 +173,13 @@
 
   function applyReaderSettings() {
     const theme = READER_THEMES[readerSettings.theme] || READER_THEMES.paper;
+    const fontFamily = readerSettings.fontFamily || "inherit";
     const root = document.documentElement;
     root.style.setProperty("--su-reader-bg", theme.background);
     root.style.setProperty("--su-reader-text", theme.text);
     root.style.setProperty("--su-reader-link", theme.link);
-    root.style.setProperty("--su-reader-font", readerSettings.fontFamily);
+    root.style.setProperty("--su-reader-font", fontFamily);
+    root.style.setProperty("--su-reader-font-family", fontFamily);
     root.style.setProperty("--su-reader-size", `${readerSettings.fontSize}px`);
     root.style.setProperty("--su-reader-line", readerSettings.lineHeight.toString());
     root.style.setProperty("--su-reader-width", `${readerSettings.maxWidth}px`);
@@ -183,7 +208,9 @@
 
   function updateReaderSettings(next) {
     readerSettings = { ...readerSettings, ...next };
-    chrome.storage.local.set({ [READER_SETTINGS_KEY]: readerSettings });
+    if (isExtensionContextValid()) {
+      chrome.storage.local.set({ [READER_SETTINGS_KEY]: readerSettings });
+    }
     applyReaderSettings();
     if (lastReadingModeEnabled) {
       if (readerSettings.autoRebuild) {
@@ -528,7 +555,7 @@
   }
 
   function updatePanelState() {
-    const panel = document.getElementById(PANEL_ID);
+    const panel = panelRoot;
     if (!panel) return;
 
     const selectionToggle = panel.querySelector("[data-utility='selection'] input");
@@ -670,6 +697,7 @@
       createSelectRow({
         label: "Font",
         options: [
+          { label: "Site default", value: "" },
           { label: "Georgia", value: "Georgia, 'Times New Roman', serif" },
           { label: "Charter", value: "Charter, 'Georgia', serif" },
           { label: "Merriweather", value: "'Merriweather', Georgia, serif" },
@@ -946,23 +974,346 @@
     return panel;
   }
 
+  function injectPanelStyles(shadowRoot) {
+    if (panelStyleEl) return;
+    panelStyleEl = document.createElement("style");
+    panelStyleEl.textContent = `
+      .su-panel {
+        position: fixed;
+        right: 14px;
+        bottom: 14px;
+        width: 280px;
+        max-width: 92vw;
+        z-index: 2147483647;
+        background: #101316;
+        color: #e6eef7;
+        border: 1px solid #2a3038;
+        border-radius: 12px;
+        padding: 12px;
+        font: 12px/1.4 "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+      }
+
+      .su-panel.su-hidden {
+        display: none;
+      }
+
+      .su-panel.su-minimized {
+        width: auto;
+        padding: 8px 10px;
+        cursor: pointer;
+      }
+
+      .su-panel.su-minimized .su-content {
+        display: none;
+      }
+
+      .su-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        margin-bottom: 8px;
+      }
+
+      .su-title-wrap {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .su-icon {
+        width: 18px;
+        height: 18px;
+        border-radius: 4px;
+      }
+
+      .su-title {
+        font-weight: 700;
+        font-size: 13px;
+      }
+
+      .su-minimize {
+        border: 1px solid #2f3a46;
+        background: #171d24;
+        color: #e6eef7;
+        padding: 4px;
+        border-radius: 8px;
+        cursor: pointer;
+        width: 28px;
+        height: 28px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .su-minimize:hover {
+        background: #1f2630;
+      }
+
+      .su-section-title {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: #9fb7d0;
+        margin: 0 0 6px;
+      }
+
+      .su-utilities {
+        display: grid;
+        gap: 8px;
+      }
+
+      .su-utility {
+        border: 1px solid #222a33;
+        background: #151a20;
+        border-radius: 10px;
+        overflow: hidden;
+      }
+
+      .su-utility-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        padding: 10px 12px;
+        cursor: pointer;
+      }
+
+      .su-utility-title {
+        font-size: 12px;
+        font-weight: 600;
+      }
+
+      .su-utility-body {
+        display: none;
+        padding: 8px 12px 12px;
+        border-top: 1px solid #1e242c;
+        gap: 8px;
+      }
+
+      .su-utility.is-open .su-utility-body {
+        display: grid;
+      }
+
+      .su-utility-desc {
+        color: #c0ccdb;
+        font-size: 11px;
+      }
+
+      .su-utility-note {
+        color: #9fb7d0;
+        font-size: 10px;
+      }
+
+      .su-utility-actions {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+
+      .su-collapse-icon {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 20px;
+        height: 20px;
+        color: #9fb7d0;
+      }
+
+      .su-status {
+        font-size: 10px;
+        color: #7ddc9f;
+      }
+
+      .su-status.su-off {
+        color: #f2b5b5;
+      }
+
+      .su-settings {
+        display: grid;
+        gap: 12px;
+        margin-top: 8px;
+      }
+
+      .su-settings-section {
+        display: grid;
+        gap: 8px;
+      }
+
+      .su-settings-title {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: #9fb7d0;
+      }
+
+      .su-settings-row {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 8px;
+        align-items: center;
+      }
+
+      .su-settings-row--range {
+        grid-template-columns: 1fr auto;
+      }
+
+      .su-settings-label {
+        font-size: 11px;
+        color: #d6dee7;
+      }
+
+      .su-settings-value {
+        font-size: 11px;
+        color: #9fb7d0;
+      }
+
+      .su-settings-range {
+        grid-column: 1 / -1;
+        accent-color: #60d480;
+      }
+
+      .su-settings-select {
+        background: #171d24;
+        color: #e6eef7;
+        border: 1px solid #2f3a46;
+        border-radius: 8px;
+        padding: 4px 6px;
+        font-size: 11px;
+      }
+
+      .su-settings-button {
+        border: 1px solid #2f3a46;
+        background: #171d24;
+        color: #e6eef7;
+        padding: 4px 8px;
+        border-radius: 8px;
+        cursor: pointer;
+        font-size: 11px;
+      }
+
+      .su-settings-button:hover {
+        background: #1f2630;
+      }
+
+      /* Switch UI (adapted from Uiverse.io by Admin12121) */
+      .switch-button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        height: 28px;
+      }
+
+      .switch-button .switch-outer {
+        height: 100%;
+        background: #252532;
+        width: 60px;
+        border-radius: 999px;
+        box-shadow: inset 0 4px 8px 0 #16151c, 0 3px 6px -2px #403f4e;
+        border: 1px solid #32303e;
+        padding: 4px;
+        box-sizing: border-box;
+        cursor: pointer;
+        -webkit-tap-highlight-color: transparent;
+        position: relative;
+      }
+
+      .switch-button .switch-outer input[type="checkbox"] {
+        opacity: 0;
+        appearance: none;
+        position: absolute;
+      }
+
+      .switch-button .switch-outer .button {
+        width: 100%;
+        height: 100%;
+        display: flex;
+        position: relative;
+        justify-content: space-between;
+      }
+
+      .switch-button .switch-outer .button-toggle {
+        height: 20px;
+        width: 20px;
+        background: linear-gradient(#3b3a4e, #272733);
+        border-radius: 100%;
+        box-shadow: inset 0 3px 3px 0 #424151, 0 4px 12px 0 #0f0e17;
+        position: relative;
+        z-index: 2;
+        transition: left 0.3s ease-in;
+        left: 0;
+      }
+
+      .switch-button
+        .switch-outer
+        input[type="checkbox"]:checked
+        + .button
+        .button-toggle {
+        left: 52%;
+      }
+
+      .switch-button .switch-outer .button-indicator {
+        height: 12px;
+        width: 12px;
+        top: 50%;
+        transform: translateY(-50%);
+        border-radius: 50%;
+        border: 2px solid #ef565f;
+        box-sizing: border-box;
+        right: 6px;
+        position: relative;
+      }
+
+      .switch-button
+        .switch-outer
+        input[type="checkbox"]:checked
+        + .button
+        .button-indicator {
+        animation: su-indicator 0.6s forwards;
+      }
+
+      @keyframes su-indicator {
+        30% {
+          opacity: 0;
+        }
+
+        0% {
+          opacity: 1;
+        }
+
+        100% {
+          opacity: 1;
+          border: 2px solid #60d480;
+          left: -66%;
+        }
+      }
+    `;
+    shadowRoot.appendChild(panelStyleEl);
+  }
+
   function ensurePanel() {
-    if (document.getElementById(PANEL_ID)) return;
+    if (panelHost) return;
     if (!document.body) {
       setTimeout(ensurePanel, 50);
       return;
     }
-    const panel = createPanel();
-    if (!panelVisible) panel.classList.add("su-hidden");
-    document.body.appendChild(panel);
+    panelHost = document.createElement("div");
+    panelHost.id = PANEL_ID;
+    const shadowRoot = panelHost.attachShadow({ mode: "open" });
+    injectPanelStyles(shadowRoot);
+    panelRoot = createPanel();
+    shadowRoot.appendChild(panelRoot);
+    if (!panelVisible) panelHost.style.display = "none";
+    document.body.appendChild(panelHost);
   }
 
   function setPanelVisible(visible) {
     panelVisible = visible;
     ensurePanel();
-    const panel = document.getElementById(PANEL_ID);
-    if (!panel) return;
-    panel.classList.toggle("su-hidden", !visible);
+    if (!panelHost) return;
+    panelHost.style.display = visible ? "block" : "none";
   }
 
   function togglePanel() {
@@ -972,7 +1323,9 @@
   function updateSiteToggle(key, value) {
     const map = key === SITE_SELECTION_KEY ? { ...siteSelectionMap } : { ...siteReadingMap };
     map[hostname] = value;
-    chrome.storage.local.set({ [key]: map });
+    if (isExtensionContextValid()) {
+      chrome.storage.local.set({ [key]: map });
+    }
   }
 
   function applyStoredState() {
@@ -995,6 +1348,7 @@
   }
 
   function loadState() {
+    if (!isExtensionContextValid()) return;
     chrome.storage.local.get(
       [
         STORAGE_KEY,
@@ -1006,6 +1360,7 @@
         READER_SETTINGS_KEY
       ],
       (result) => {
+        if (!isExtensionContextValid()) return;
         defaultSelectionEnabled = result[DEFAULT_SELECTION_KEY] === true;
         defaultReadingEnabled = result[DEFAULT_READING_KEY] === true;
         siteSelectionMap = result[SITE_SELECTION_KEY] || {};
@@ -1026,54 +1381,58 @@
     );
   }
 
-  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (!message || !message.type) return;
-    if (message.type === "toggle_panel") {
-      togglePanel();
-      sendResponse({ ok: true });
-      return true;
-    }
-  });
+  if (isExtensionContextValid()) {
+    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+      if (!message || !message.type) return;
+      if (message.type === "toggle_panel") {
+        togglePanel();
+        sendResponse({ ok: true });
+        return true;
+      }
+    });
+  }
 
   function init() {
     ensurePanel();
     loadState();
 
-    chrome.storage.onChanged.addListener((changes, areaName) => {
-      if (areaName !== "local") return;
-      let shouldApply = false;
+    if (isExtensionContextValid()) {
+      chrome.storage.onChanged.addListener((changes, areaName) => {
+        if (areaName !== "local") return;
+        let shouldApply = false;
 
-      if (DEFAULT_SELECTION_KEY in changes) {
-        defaultSelectionEnabled = changes[DEFAULT_SELECTION_KEY].newValue === true;
-        shouldApply = true;
-      }
+        if (DEFAULT_SELECTION_KEY in changes) {
+          defaultSelectionEnabled = changes[DEFAULT_SELECTION_KEY].newValue === true;
+          shouldApply = true;
+        }
 
-      if (DEFAULT_READING_KEY in changes) {
-        defaultReadingEnabled = changes[DEFAULT_READING_KEY].newValue === true;
-        shouldApply = true;
-      }
+        if (DEFAULT_READING_KEY in changes) {
+          defaultReadingEnabled = changes[DEFAULT_READING_KEY].newValue === true;
+          shouldApply = true;
+        }
 
-      if (SITE_SELECTION_KEY in changes) {
-        siteSelectionMap = changes[SITE_SELECTION_KEY].newValue || {};
-        shouldApply = true;
-      }
+        if (SITE_SELECTION_KEY in changes) {
+          siteSelectionMap = changes[SITE_SELECTION_KEY].newValue || {};
+          shouldApply = true;
+        }
 
-      if (SITE_READING_KEY in changes) {
-        siteReadingMap = changes[SITE_READING_KEY].newValue || {};
-        shouldApply = true;
-      }
+        if (SITE_READING_KEY in changes) {
+          siteReadingMap = changes[SITE_READING_KEY].newValue || {};
+          shouldApply = true;
+        }
 
-      if (READER_SETTINGS_KEY in changes) {
-        readerSettings = {
-          ...DEFAULT_READER_SETTINGS,
-          ...(changes[READER_SETTINGS_KEY].newValue || {})
-        };
-        applyReaderSettings();
-        if (lastReadingModeEnabled) scheduleReaderRebuild();
-      }
+        if (READER_SETTINGS_KEY in changes) {
+          readerSettings = {
+            ...DEFAULT_READER_SETTINGS,
+            ...(changes[READER_SETTINGS_KEY].newValue || {})
+          };
+          applyReaderSettings();
+          if (lastReadingModeEnabled) scheduleReaderRebuild();
+        }
 
-      if (shouldApply) applyStoredState();
-    });
+        if (shouldApply) applyStoredState();
+      });
+    }
 
     sendMessage("content_ready", { url: window.location.href }).catch(() => {});
   }
