@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Swiss Utility Options</title>
+    <link rel="stylesheet" href="options.css" />
+  </head>
+  <body>
+    <main class="options">
+      <h1>Swiss Utility</h1>
+      <p class="subtitle">Panel toggles are remembered per-site. Set the default state for new sites below.</p>
+
+      <div class="utility">
+        <div>
+          <div class="utility-title">Right-click & Select (Default)</div>
+          <div class="utility-desc">Enable right-click menu and text selection/copy by default.</div>
+        </div>
+        <label class="switch-button">
+          <div class="switch-outer">
+            <input id="toggle-selection" type="checkbox" />
+            <div class="button">
+              <span class="button-toggle"></span>
+              <span class="button-indicator"></span>
+            </div>
+          </div>
+        </label>
+      </div>
+
+      <div class="utility">
+        <div>
+          <div class="utility-title">Reading Mode (Default)</div>
+          <div class="utility-desc">Enable reading mode by default.</div>
+        </div>
+        <label class="switch-button">
+          <div class="switch-outer">
+            <input id="toggle-reading" type="checkbox" />
+            <div class="button">
+              <span class="button-toggle"></span>
+              <span class="button-indicator"></span>
+            </div>
+          </div>
+        </label>
+      </div>
+
+      <p id="status" class="status"></p>
+    </main>
+    <script src="options.js"></script>
+  </body>
+</html>
