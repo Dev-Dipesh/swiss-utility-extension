@@ -35,6 +35,50 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === "apply_custom_js") {
+    const code = message.payload?.code || "";
+    const tabId = sender.tab?.id;
+    if (!tabId || !code) {
+      sendResponse({ ok: false });
+      return true;
+    }
+
+    const jobId = message.payload?.jobId || "";
+    chrome.scripting.executeScript(
+      {
+        target: { tabId },
+        world: "MAIN",
+        func: (scriptText, job) => {
+          try {
+            const blob = new Blob([scriptText], { type: "text/javascript" });
+            const url = URL.createObjectURL(blob);
+            const script = document.createElement("script");
+            script.src = url;
+            script.onload = () => {
+              URL.revokeObjectURL(url);
+              script.remove();
+              window.postMessage({ source: "swiss-utility", type: "custom_js_result", jobId: job, ok: true }, "*");
+            };
+            script.onerror = () => {
+              URL.revokeObjectURL(url);
+              script.remove();
+              window.postMessage({ source: "swiss-utility", type: "custom_js_result", jobId: job, ok: false }, "*");
+            };
+            document.documentElement.appendChild(script);
+          } catch (err) {
+            console.error("[Swiss Utility] Custom JS error", err);
+            window.postMessage({ source: "swiss-utility", type: "custom_js_result", jobId: job, ok: false }, "*");
+          }
+        },
+        args: [code, jobId]
+      },
+      () => {
+        sendResponse({ ok: !chrome.runtime.lastError });
+      }
+    );
+    return true;
+  }
+
   sendResponse({ ok: false });
   return true;
 });

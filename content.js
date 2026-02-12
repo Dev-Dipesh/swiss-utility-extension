@@ -11,6 +11,7 @@
   const SITE_SELECTION_KEY = "swiss_utility_site_selection";
   const SITE_READING_KEY = "swiss_utility_site_reading";
   const READER_SETTINGS_KEY = "swiss_utility_reader_settings";
+  const SITE_CUSTOM_KEY = "swiss_utility_site_custom";
   const PANEL_ID = "swiss-utility-panel";
   const READER_ID = "swiss-utility-reader";
   const INLINE_ATTRS = [
@@ -45,6 +46,12 @@
   let siteReadingMap = {};
   let defaultSelectionEnabled = false;
   let defaultReadingEnabled = false;
+  let siteCustomMap = {};
+  let lastCustomEnabled = false;
+  let customState = { enabled: false, css: "", js: "" };
+  let lastCustomJsApplied = "";
+  let lastCustomJsStatus = "idle";
+  let lastCustomJsMessage = "";
 
   const DEFAULT_READER_SETTINGS = {
     fontFamily: "Georgia",
@@ -69,6 +76,8 @@
   const readerControls = {};
   let suppressReaderObserver = false;
   let lastReaderRebuildAt = 0;
+  const customControls = {};
+  let customSaveTimer = null;
 
   function log(...args) {
     console.log(PREFIX, ...args);
@@ -629,6 +638,28 @@
         readingStatus.classList.remove("su-off");
       }
     }
+
+    const customToggle = panel.querySelector("[data-utility='custom'] input");
+    const customStatus = panel.querySelector("[data-utility='custom'] .su-status");
+    if (customToggle) customToggle.checked = lastCustomEnabled;
+    if (customStatus) {
+      customStatus.textContent = lastCustomEnabled ? "Active" : "Disabled";
+      customStatus.classList.toggle("su-off", !lastCustomEnabled);
+    }
+
+    if (customControls.jsStatus) {
+      customControls.jsStatus.textContent = lastCustomJsMessage || "";
+      customControls.jsStatus.classList.toggle("su-off", lastCustomJsStatus === "error");
+    }
+
+    if (customControls.cssInput) {
+      const active = document.activeElement === customControls.cssInput;
+      if (!active) customControls.cssInput.value = customState.css || "";
+    }
+    if (customControls.jsInput) {
+      const active = document.activeElement === customControls.jsInput;
+      if (!active) customControls.jsInput.value = customState.js || "";
+    }
   }
 
   function updateMinimizeIcon(panel) {
@@ -852,6 +883,70 @@
     return container;
   }
 
+  function buildCustomInjectionSettings() {
+    const container = document.createElement("div");
+    container.className = "su-settings";
+
+    const warning = document.createElement("div");
+    warning.className = "su-utility-note";
+    warning.textContent = "Note: Some sites block injected JS via CSP.";
+    container.appendChild(warning);
+
+    const cssLabel = document.createElement("div");
+    cssLabel.className = "su-settings-label";
+    cssLabel.textContent = "Custom CSS";
+    const cssArea = document.createElement("textarea");
+    cssArea.className = "su-settings-textarea";
+    cssArea.rows = 6;
+    cssArea.placeholder = "/* CSS applied to this site */";
+    cssArea.addEventListener("input", scheduleCustomSave);
+    customControls.cssInput = cssArea;
+
+    const jsLabel = document.createElement("div");
+    jsLabel.className = "su-settings-label";
+    jsLabel.textContent = "Custom JS";
+    const jsArea = document.createElement("textarea");
+    jsArea.className = "su-settings-textarea";
+    jsArea.rows = 6;
+    jsArea.placeholder = "// JS injected into this page";
+    jsArea.addEventListener("input", scheduleCustomSave);
+    customControls.jsInput = jsArea;
+
+    const jsStatus = document.createElement("div");
+    jsStatus.className = "su-settings-status";
+    customControls.jsStatus = jsStatus;
+
+    const actions = document.createElement("div");
+    actions.className = "su-settings-row";
+    const applyLabel = document.createElement("div");
+    applyLabel.className = "su-settings-label";
+    applyLabel.textContent = "Apply now";
+    const applyBtn = document.createElement("button");
+    applyBtn.type = "button";
+    applyBtn.className = "su-settings-button";
+    applyBtn.textContent = "Apply";
+    applyBtn.addEventListener("click", () => {
+      customState = {
+        enabled: lastCustomEnabled,
+        css: cssArea.value || "",
+        js: jsArea.value || ""
+      };
+      updateCustomStorage(customState);
+      if (lastCustomEnabled) applyCustomState(customState);
+    });
+    actions.appendChild(applyLabel);
+    actions.appendChild(applyBtn);
+
+    container.appendChild(cssLabel);
+    container.appendChild(cssArea);
+    container.appendChild(jsLabel);
+    container.appendChild(jsArea);
+    container.appendChild(jsStatus);
+    container.appendChild(actions);
+
+    return container;
+  }
+
   function setOpenUtility(panel, id) {
     const currentOpen = panel.querySelector(".su-utility.is-open");
     if (currentOpen && currentOpen.dataset.utility === id) {
@@ -995,13 +1090,32 @@
       onToggle: (value) => updateSiteToggle(SITE_READING_KEY, value)
     });
 
+    const customUtility = createUtilityCard({
+      id: "custom",
+      title: "Custom CSS / JS",
+      description: "Inject custom CSS and JS on this site.",
+      note: "Applies automatically on this site when enabled.",
+      checked: lastCustomEnabled,
+      onToggle: (value) => {
+        const nextState = { ...customState, enabled: value };
+        updateCustomStorage(nextState);
+        applyCustomState(nextState);
+      }
+    });
+
     const readingBody = readingUtility.querySelector(".su-utility-body");
     if (readingBody) {
       readingBody.appendChild(buildReadingSettings());
     }
 
+    const customBody = customUtility.querySelector(".su-utility-body");
+    if (customBody) {
+      customBody.appendChild(buildCustomInjectionSettings());
+    }
+
     utilities.appendChild(selectionUtility);
     utilities.appendChild(readingUtility);
+    utilities.appendChild(customUtility);
 
     content.appendChild(sectionTitle);
     content.appendChild(utilities);
@@ -1246,6 +1360,30 @@
         background: #1f2630;
       }
 
+      .su-settings-textarea {
+        width: 100%;
+        min-height: 80px;
+        background: #0f1317;
+        color: #e6eef7;
+        border: 1px solid #2f3a46;
+        border-radius: 8px;
+        padding: 8px;
+        font-size: 11px;
+        resize: vertical;
+        box-sizing: border-box;
+      }
+
+      .su-settings-textarea:focus {
+        outline: 1px solid #60d480;
+        border-color: #60d480;
+      }
+
+      .su-settings-status {
+        font-size: 10px;
+        color: #9fb7d0;
+        margin-top: -2px;
+      }
+
       /* Switch UI (adapted from Uiverse.io by Admin12121) */
       .switch-button {
         display: inline-flex;
@@ -1376,6 +1514,74 @@
     }
   }
 
+  function updateCustomStorage(nextState) {
+    siteCustomMap = { ...siteCustomMap, [hostname]: nextState };
+    if (isExtensionContextValid()) {
+      chrome.storage.local.set({ [SITE_CUSTOM_KEY]: siteCustomMap });
+    }
+  }
+
+  function scheduleCustomSave() {
+    if (!customControls.cssInput || !customControls.jsInput) return;
+    clearTimeout(customSaveTimer);
+    customSaveTimer = setTimeout(() => {
+      customState = {
+        enabled: lastCustomEnabled,
+        css: customControls.cssInput.value || "",
+        js: customControls.jsInput.value || ""
+      };
+      updateCustomStorage(customState);
+      if (lastCustomEnabled) applyCustomState(customState);
+    }, 500);
+  }
+
+  function ensureCustomCssEl() {
+    let el = document.getElementById("su-custom-css");
+    if (!el) {
+      el = document.createElement("style");
+      el.id = "su-custom-css";
+      document.documentElement.appendChild(el);
+    }
+    return el;
+  }
+
+  function applyCustomState(state) {
+    customState = { ...customState, ...state };
+    lastCustomEnabled = customState.enabled === true;
+
+    if (!lastCustomEnabled) {
+      const cssEl = document.getElementById("su-custom-css");
+      if (cssEl) cssEl.remove();
+      lastCustomJsStatus = "idle";
+      lastCustomJsMessage = "";
+      updatePanelState();
+      return;
+    }
+
+    if (customState.css && customState.css.trim()) {
+      const cssEl = ensureCustomCssEl();
+      cssEl.textContent = customState.css;
+    } else {
+      const cssEl = document.getElementById("su-custom-css");
+      if (cssEl) cssEl.remove();
+    }
+
+    const jsCode = (customState.js || "").trim();
+    if (jsCode && jsCode !== lastCustomJsApplied) {
+      lastCustomJsApplied = jsCode;
+      lastCustomJsStatus = "pending";
+      lastCustomJsMessage = "Applying JS...";
+      updatePanelState();
+      const jobId = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+      if (isExtensionContextValid()) {
+        chrome.storage.local.set({ swiss_utility_custom_job: jobId });
+      }
+      sendMessage("apply_custom_js", { code: jsCode, jobId }).catch(() => {});
+    }
+
+    updatePanelState();
+  }
+
   function applyStoredState() {
     const selectionValue =
       Object.prototype.hasOwnProperty.call(siteSelectionMap, hostname)
@@ -1387,12 +1593,17 @@
         ? siteReadingMap[hostname]
         : defaultReadingEnabled;
 
-    if (selectionValue === true || readingValue === true) {
+    const customValue = Object.prototype.hasOwnProperty.call(siteCustomMap, hostname)
+      ? siteCustomMap[hostname]
+      : customState;
+
+    if (selectionValue === true || readingValue === true || customValue?.enabled === true) {
       setPanelVisible(true);
     }
 
     setSelectionEnabled(selectionValue === true);
     setReadingModeEnabled(readingValue === true);
+    if (customValue) applyCustomState(customValue);
   }
 
   function loadState() {
@@ -1405,7 +1616,8 @@
         DEFAULT_READING_KEY,
         SITE_SELECTION_KEY,
         SITE_READING_KEY,
-        READER_SETTINGS_KEY
+        READER_SETTINGS_KEY,
+        SITE_CUSTOM_KEY
       ],
       (result) => {
         if (!isExtensionContextValid()) return;
@@ -1413,6 +1625,7 @@
         defaultReadingEnabled = result[DEFAULT_READING_KEY] === true;
         siteSelectionMap = result[SITE_SELECTION_KEY] || {};
         siteReadingMap = result[SITE_READING_KEY] || {};
+        siteCustomMap = result[SITE_CUSTOM_KEY] || {};
         readerSettings = { ...DEFAULT_READER_SETTINGS, ...(result[READER_SETTINGS_KEY] || {}) };
         applyReaderSettings();
 
@@ -1429,6 +1642,23 @@
     );
   }
 
+  function handleCustomJsResult(event) {
+    if (!event || !event.data) return;
+    const data = event.data;
+    if (data.source !== "swiss-utility" || data.type !== "custom_js_result") return;
+    if (!data.jobId) return;
+
+    if (isExtensionContextValid()) {
+      chrome.storage.local.get(["swiss_utility_custom_job"], (result) => {
+        if (!isExtensionContextValid()) return;
+        if (result.swiss_utility_custom_job !== data.jobId) return;
+        lastCustomJsStatus = data.ok ? "success" : "error";
+        lastCustomJsMessage = data.ok ? "JS applied" : "JS blocked by CSP";
+        updatePanelState();
+      });
+    }
+  }
+
   if (isExtensionContextValid()) {
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (!message || !message.type) return;
@@ -1443,6 +1673,7 @@
   function init() {
     ensurePanel();
     loadState();
+    window.addEventListener("message", handleCustomJsResult);
 
     if (isExtensionContextValid()) {
       chrome.storage.onChanged.addListener((changes, areaName) => {
@@ -1464,16 +1695,22 @@
           shouldApply = true;
         }
 
-        if (SITE_READING_KEY in changes) {
-          siteReadingMap = changes[SITE_READING_KEY].newValue || {};
-          shouldApply = true;
-        }
+      if (SITE_READING_KEY in changes) {
+        siteReadingMap = changes[SITE_READING_KEY].newValue || {};
+        shouldApply = true;
+      }
 
-        if (READER_SETTINGS_KEY in changes) {
-          readerSettings = {
-            ...DEFAULT_READER_SETTINGS,
-            ...(changes[READER_SETTINGS_KEY].newValue || {})
-          };
+      if (SITE_CUSTOM_KEY in changes) {
+        siteCustomMap = changes[SITE_CUSTOM_KEY].newValue || {};
+        const nextCustom = siteCustomMap[hostname] || customState;
+        applyCustomState(nextCustom);
+      }
+
+      if (READER_SETTINGS_KEY in changes) {
+        readerSettings = {
+          ...DEFAULT_READER_SETTINGS,
+          ...(changes[READER_SETTINGS_KEY].newValue || {})
+        };
           applyReaderSettings();
           if (lastReadingModeEnabled) scheduleReaderRebuild();
         }
