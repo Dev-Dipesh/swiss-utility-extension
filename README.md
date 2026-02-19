@@ -5,6 +5,7 @@ Small targeted utilities for the web. Panel is hidden by default and appears onl
 ## Utilities
 - Right-click & Select: enable right-click menu and text selection/copy.
 - Reading Mode: simplify layout and improve readability.
+- Read Aloud: read selected or detected page text using browser text-to-speech.
 
 ## Features
 - Permanent in-page panel with minimize option (shown on demand).

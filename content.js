@@ -8,9 +8,12 @@
   const READING_MODE_KEY = "swiss_utility_reading_mode";
   const DEFAULT_SELECTION_KEY = "swiss_utility_default_selection";
   const DEFAULT_READING_KEY = "swiss_utility_default_reading";
+  const DEFAULT_READ_ALOUD_KEY = "swiss_utility_default_read_aloud";
   const SITE_SELECTION_KEY = "swiss_utility_site_selection";
   const SITE_READING_KEY = "swiss_utility_site_reading";
+  const SITE_READ_ALOUD_KEY = "swiss_utility_site_read_aloud";
   const READER_SETTINGS_KEY = "swiss_utility_reader_settings";
+  const READ_ALOUD_SETTINGS_KEY = "swiss_utility_read_aloud_settings";
   const SITE_CUSTOM_KEY = "swiss_utility_site_custom";
   const PANEL_ID = "swiss-utility-panel";
   const READER_ID = "swiss-utility-reader";
@@ -36,6 +39,7 @@
 
   let lastSelectionEnabled = false;
   let lastReadingModeEnabled = false;
+  let lastReadAloudEnabled = false;
   let panelVisible = false;
   let readerReady = false;
   let panelHost = null;
@@ -44,8 +48,10 @@
 
   let siteSelectionMap = {};
   let siteReadingMap = {};
+  let siteReadAloudMap = {};
   let defaultSelectionEnabled = false;
   let defaultReadingEnabled = false;
+  let defaultReadAloudEnabled = false;
   let siteCustomMap = {};
   let lastCustomEnabled = false;
   let customState = { enabled: false, css: "", js: "" };
@@ -63,6 +69,14 @@
     autoRebuild: true
   };
 
+  const DEFAULT_READ_ALOUD_SETTINGS = {
+    voiceURI: "",
+    rate: 1,
+    pitch: 1,
+    volume: 1,
+    chunkLength: 240
+  };
+
   const READER_THEMES = {
     paper: { background: "#f6f0e6", text: "#1c1b1a", link: "#8a5a2b" },
     warm: { background: "#f3eadc", text: "#2b241d", link: "#7a4e2a" },
@@ -78,6 +92,14 @@
   let lastReaderRebuildAt = 0;
   const customControls = {};
   let customSaveTimer = null;
+  let readAloudSettings = { ...DEFAULT_READ_ALOUD_SETTINGS };
+  const readAloudControls = {};
+  let readAloudVoices = [];
+  let readAloudQueue = [];
+  let readAloudIndex = 0;
+  let readAloudState = "idle";
+  let readAloudPaused = false;
+  let activeUtterance = null;
 
   function log(...args) {
     console.log(PREFIX, ...args);
@@ -550,6 +572,294 @@
     updatePanelState();
   }
 
+  function canUseReadAloud() {
+    return typeof window.speechSynthesis !== "undefined" && typeof window.SpeechSynthesisUtterance !== "undefined";
+  }
+
+  function normalizeSpeechText(text) {
+    return text
+      .replace(/https?:\/\/\S+/gi, "HTTP URL.")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function breakIntoChunks(text, maxLength) {
+    if (!text) return [];
+    if (text.length <= maxLength) return [text];
+
+    const chunks = [];
+    let remaining = text;
+    while (remaining.length > maxLength) {
+      let splitAt = -1;
+      const windowText = remaining.slice(0, maxLength + 1);
+      splitAt = Math.max(windowText.lastIndexOf(". "), windowText.lastIndexOf("! "));
+      splitAt = Math.max(splitAt, windowText.lastIndexOf("? "));
+      splitAt = Math.max(splitAt, windowText.lastIndexOf("; "));
+      splitAt = Math.max(splitAt, windowText.lastIndexOf(", "));
+      if (splitAt < Math.floor(maxLength * 0.5)) splitAt = windowText.lastIndexOf(" ");
+      if (splitAt < 1) splitAt = maxLength;
+      const piece = normalizeSpeechText(remaining.slice(0, splitAt + 1));
+      if (piece) chunks.push(piece);
+      remaining = remaining.slice(splitAt + 1).trimStart();
+    }
+    const tail = normalizeSpeechText(remaining);
+    if (tail) chunks.push(tail);
+    return chunks;
+  }
+
+  function fixParagraphs(paragraphs) {
+    const out = [];
+    let current = "";
+    paragraphs.forEach((para) => {
+      const text = String(para || "").trim();
+      if (!text) {
+        if (current) {
+          out.push(current);
+          current = "";
+        }
+        return;
+      }
+      if (current) {
+        if (/[-\u2013\u2014]$/.test(current)) current = current.slice(0, -1);
+        else current += " ";
+      }
+      current += text.replace(/[-\u2013\u2014]\r?\n/g, "");
+      if (/[.!?:)"'\u2019\u201d]$/.test(text)) {
+        out.push(current);
+        current = "";
+      }
+    });
+    if (current) out.push(current);
+    return out;
+  }
+
+  function getReadAloudSourceText() {
+    const selected = window.getSelection()?.toString().trim();
+    if (selected) return selected;
+
+    const readerEl = document.getElementById(READER_ID);
+    if (lastReadingModeEnabled && readerEl && readerEl.innerText && readerEl.innerText.trim().length > 100) {
+      return readerEl.innerText;
+    }
+
+    const source = pickReadingSource();
+    if (source && source.innerText && source.innerText.trim().length > 100) {
+      return source.innerText;
+    }
+
+    return document.body?.innerText || "";
+  }
+
+  function buildReadAloudQueue() {
+    const text = getReadAloudSourceText();
+    const paragraphs = text
+      .split(/(?:\s*\r?\n\s*){2,}/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+    const merged = fixParagraphs(paragraphs.length ? paragraphs : [text]);
+    const chunkLength = Math.max(120, Math.min(420, Number(readAloudSettings.chunkLength) || 240));
+    return merged.flatMap((para) => breakIntoChunks(normalizeSpeechText(para), chunkLength)).filter(Boolean);
+  }
+
+  function refreshReadAloudVoices() {
+    if (!canUseReadAloud()) return;
+    const voices = window.speechSynthesis.getVoices() || [];
+    readAloudVoices = voices.slice().sort((a, b) => a.name.localeCompare(b.name));
+    const hasSelected = readAloudVoices.some((voice) => voice.voiceURI === readAloudSettings.voiceURI);
+    if (!hasSelected && readAloudVoices.length > 0) {
+      readAloudSettings.voiceURI = readAloudVoices[0].voiceURI;
+      if (isExtensionContextValid()) {
+        chrome.storage.local.set({ [READ_ALOUD_SETTINGS_KEY]: readAloudSettings });
+      }
+    }
+    updateReadAloudControls();
+  }
+
+  function updateReadAloudSettings(next) {
+    readAloudSettings = { ...readAloudSettings, ...next };
+    if (isExtensionContextValid()) {
+      chrome.storage.local.set({ [READ_ALOUD_SETTINGS_KEY]: readAloudSettings });
+    }
+    updateReadAloudControls();
+  }
+
+  function updateReadAloudControls() {
+    if (readAloudControls.voice) {
+      readAloudControls.voice.innerHTML = "";
+      if (!readAloudVoices.length) {
+        const option = document.createElement("option");
+        option.value = "";
+        option.textContent = "System default";
+        readAloudControls.voice.appendChild(option);
+      } else {
+        readAloudVoices.forEach((voice) => {
+          const option = document.createElement("option");
+          option.value = voice.voiceURI;
+          const lang = voice.lang ? ` (${voice.lang})` : "";
+          option.textContent = `${voice.name}${lang}`;
+          readAloudControls.voice.appendChild(option);
+        });
+      }
+      readAloudControls.voice.value = readAloudSettings.voiceURI || "";
+    }
+    if (readAloudControls.rate) readAloudControls.rate.value = String(readAloudSettings.rate);
+    if (readAloudControls.rateValue) readAloudControls.rateValue.textContent = `${readAloudSettings.rate.toFixed(2)}x`;
+    if (readAloudControls.pitch) readAloudControls.pitch.value = String(readAloudSettings.pitch);
+    if (readAloudControls.pitchValue) readAloudControls.pitchValue.textContent = readAloudSettings.pitch.toFixed(2);
+    if (readAloudControls.volume) readAloudControls.volume.value = String(readAloudSettings.volume);
+    if (readAloudControls.volumeValue) {
+      readAloudControls.volumeValue.textContent = `${Math.round(readAloudSettings.volume * 100)}%`;
+    }
+    if (readAloudControls.chunkLength) {
+      readAloudControls.chunkLength.value = String(readAloudSettings.chunkLength);
+    }
+    if (readAloudControls.chunkLengthValue) {
+      let hint = "Balanced";
+      if (readAloudSettings.chunkLength <= 180) hint = "Short";
+      else if (readAloudSettings.chunkLength >= 320) hint = "Long";
+      readAloudControls.chunkLengthValue.textContent = `${hint}`;
+    }
+  }
+
+  function setReadAloudState(nextState) {
+    readAloudState = nextState;
+    updatePanelState();
+  }
+
+  function clearReadAloudPlayback() {
+    if (!canUseReadAloud()) return;
+    window.speechSynthesis.cancel();
+    activeUtterance = null;
+    readAloudPaused = false;
+  }
+
+  function stopReadAloud() {
+    clearReadAloudPlayback();
+    readAloudQueue = [];
+    readAloudIndex = 0;
+    setReadAloudState("idle");
+  }
+
+  function waitForSpeechIdle(callback, attempt = 0) {
+    if (!canUseReadAloud()) {
+      callback();
+      return;
+    }
+    if (!window.speechSynthesis.speaking || attempt > 30) {
+      callback();
+      return;
+    }
+    setTimeout(() => waitForSpeechIdle(callback, attempt + 1), 25);
+  }
+
+  function restartReadAloud() {
+    if (!canUseReadAloud()) return;
+    const wasActive = readAloudState === "playing" || readAloudState === "paused";
+    if (!wasActive) return;
+
+    if (!readAloudQueue.length) {
+      readAloudQueue = buildReadAloudQueue();
+      readAloudIndex = 0;
+    }
+    if (!readAloudQueue.length) {
+      setReadAloudState("empty");
+      return;
+    }
+
+    readAloudPaused = false;
+    clearReadAloudPlayback();
+    waitForSpeechIdle(() => {
+      if (!lastReadAloudEnabled) return;
+      if (!readAloudQueue.length) return;
+      if (readAloudIndex >= readAloudQueue.length) readAloudIndex = 0;
+      speakCurrentChunk();
+    });
+  }
+
+  function speakCurrentChunk() {
+    if (!lastReadAloudEnabled || !canUseReadAloud()) {
+      stopReadAloud();
+      return;
+    }
+    if (readAloudIndex >= readAloudQueue.length) {
+      stopReadAloud();
+      return;
+    }
+
+    const utterance = new window.SpeechSynthesisUtterance(readAloudQueue[readAloudIndex]);
+    const voice = readAloudVoices.find((item) => item.voiceURI === readAloudSettings.voiceURI);
+    if (voice) utterance.voice = voice;
+    if (voice?.lang) utterance.lang = voice.lang;
+    utterance.rate = Number(readAloudSettings.rate) || 1;
+    utterance.pitch = Number(readAloudSettings.pitch) || 1;
+    utterance.volume = Number(readAloudSettings.volume) || 1;
+    utterance.onend = () => {
+      if (readAloudPaused) return;
+      readAloudIndex += 1;
+      speakCurrentChunk();
+    };
+    utterance.onerror = () => {
+      setReadAloudState("error");
+    };
+
+    activeUtterance = utterance;
+    window.speechSynthesis.speak(utterance);
+    setReadAloudState("playing");
+  }
+
+  function startReadAloud() {
+    if (!lastReadAloudEnabled || !canUseReadAloud()) {
+      setReadAloudState("unsupported");
+      return;
+    }
+
+    if (readAloudPaused && window.speechSynthesis.paused) {
+      window.speechSynthesis.resume();
+      readAloudPaused = false;
+      setReadAloudState("playing");
+      return;
+    }
+
+    if (window.speechSynthesis.speaking) return;
+    readAloudQueue = buildReadAloudQueue();
+    readAloudIndex = 0;
+    if (!readAloudQueue.length) {
+      setReadAloudState("empty");
+      return;
+    }
+    speakCurrentChunk();
+  }
+
+  function pauseReadAloud() {
+    if (!canUseReadAloud()) return;
+    if (!window.speechSynthesis.speaking || window.speechSynthesis.paused) return;
+    window.speechSynthesis.pause();
+    readAloudPaused = true;
+    setReadAloudState("paused");
+  }
+
+  function toggleReadAloudPlayback() {
+    if (!lastReadAloudEnabled) return;
+    if (readAloudState === "playing") {
+      pauseReadAloud();
+    } else {
+      startReadAloud();
+    }
+  }
+
+  function setReadAloudEnabled(enabled) {
+    lastReadAloudEnabled = enabled;
+    if (!enabled) {
+      stopReadAloud();
+      setReadAloudState("idle");
+    } else if (!canUseReadAloud()) {
+      setReadAloudState("unsupported");
+    } else if (readAloudState === "idle") {
+      setReadAloudState("ready");
+    }
+    updatePanelState();
+  }
+
   function createIcon(type) {
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     svg.setAttribute("viewBox", "0 0 24 24");
@@ -637,6 +947,43 @@
         readingStatus.textContent = "Active";
         readingStatus.classList.remove("su-off");
       }
+    }
+
+    const readAloudToggle = panel.querySelector("[data-utility='read-aloud'] input");
+    const readAloudStatus = panel.querySelector("[data-utility='read-aloud'] .su-status");
+    if (readAloudToggle) readAloudToggle.checked = lastReadAloudEnabled;
+    if (readAloudStatus) {
+      if (!lastReadAloudEnabled) {
+        readAloudStatus.textContent = "Disabled";
+        readAloudStatus.classList.add("su-off");
+      } else {
+        const statusMap = {
+          ready: "Ready",
+          playing: "Playing",
+          paused: "Paused",
+          empty: "No text found",
+          unsupported: "Not supported",
+          error: "Playback error",
+          idle: "Ready"
+        };
+        const label = statusMap[readAloudState] || "Ready";
+        readAloudStatus.textContent = label;
+        const isOff = readAloudState === "empty" || readAloudState === "unsupported" || readAloudState === "error";
+        readAloudStatus.classList.toggle("su-off", isOff);
+      }
+    }
+
+    if (readAloudControls.playPause) {
+      let label = "Play";
+      if (readAloudState === "playing") label = "Pause";
+      else if (readAloudState === "paused") label = "Resume";
+      readAloudControls.playPause.textContent = label;
+      readAloudControls.playPause.disabled =
+        !lastReadAloudEnabled || readAloudState === "unsupported" || readAloudState === "error";
+    }
+    if (readAloudControls.stop) {
+      readAloudControls.stop.disabled =
+        !lastReadAloudEnabled || (readAloudState !== "playing" && readAloudState !== "paused");
     }
 
     const customToggle = panel.querySelector("[data-utility='custom'] input");
@@ -883,6 +1230,156 @@
     return container;
   }
 
+  function buildReadAloudSettings() {
+    const container = document.createElement("div");
+    container.className = "su-settings";
+
+    const controlsSection = createSettingsSection("Controls");
+    const controlsRow = document.createElement("div");
+    controlsRow.className = "su-settings-actions";
+
+    const playPauseBtn = document.createElement("button");
+    playPauseBtn.type = "button";
+    playPauseBtn.className = "su-settings-button";
+    playPauseBtn.textContent = "Play";
+    playPauseBtn.addEventListener("click", toggleReadAloudPlayback);
+    readAloudControls.playPause = playPauseBtn;
+
+    const stopBtn = document.createElement("button");
+    stopBtn.type = "button";
+    stopBtn.className = "su-settings-button";
+    stopBtn.textContent = "Stop";
+    stopBtn.addEventListener("click", stopReadAloud);
+    readAloudControls.stop = stopBtn;
+
+    controlsRow.appendChild(playPauseBtn);
+    controlsRow.appendChild(stopBtn);
+    controlsSection.appendChild(controlsRow);
+
+    const voiceSection = createSettingsSection("Voice");
+    const voiceRow = document.createElement("div");
+    voiceRow.className = "su-settings-row su-settings-row--fill";
+    const voiceLabel = document.createElement("div");
+    voiceLabel.className = "su-settings-label";
+    voiceLabel.textContent = "Voice";
+    const voiceSelect = document.createElement("select");
+    voiceSelect.className = "su-settings-select";
+    voiceSelect.addEventListener("change", () => {
+      updateReadAloudSettings({ voiceURI: voiceSelect.value });
+      restartReadAloud();
+    });
+    readAloudControls.voice = voiceSelect;
+    voiceRow.appendChild(voiceLabel);
+    voiceRow.appendChild(voiceSelect);
+    voiceSection.appendChild(voiceRow);
+
+    const createReadAloudRangeRow = ({
+      label,
+      min,
+      max,
+      step,
+      value,
+      unit,
+      onChange,
+      inputKey,
+      valueKey
+    }) => {
+      const row = document.createElement("div");
+      row.className = "su-settings-row su-settings-row--range";
+      const labelEl = document.createElement("div");
+      labelEl.className = "su-settings-label";
+      labelEl.textContent = label;
+      const valueEl = document.createElement("div");
+      valueEl.className = "su-settings-value";
+      valueEl.textContent = `${value}${unit}`;
+      const input = document.createElement("input");
+      input.className = "su-settings-range";
+      input.type = "range";
+      input.min = String(min);
+      input.max = String(max);
+      input.step = String(step);
+      input.value = String(value);
+      input.addEventListener("input", () => onChange(Number(input.value)));
+      readAloudControls[inputKey] = input;
+      readAloudControls[valueKey] = valueEl;
+      row.appendChild(labelEl);
+      row.appendChild(valueEl);
+      row.appendChild(input);
+      return row;
+    };
+
+    const tuningSection = createSettingsSection("Tuning");
+    tuningSection.appendChild(
+      createReadAloudRangeRow({
+        label: "Rate",
+        min: 0.6,
+        max: 2,
+        step: 0.05,
+        value: readAloudSettings.rate,
+        unit: "x",
+        onChange: (value) => updateReadAloudSettings({ rate: Number(value.toFixed(2)) }),
+        inputKey: "rate",
+        valueKey: "rateValue"
+      })
+    );
+    tuningSection.appendChild(
+      createReadAloudRangeRow({
+        label: "Pitch",
+        min: 0.5,
+        max: 2,
+        step: 0.05,
+        value: readAloudSettings.pitch,
+        unit: "",
+        onChange: (value) => updateReadAloudSettings({ pitch: Number(value.toFixed(2)) }),
+        inputKey: "pitch",
+        valueKey: "pitchValue"
+      })
+    );
+    tuningSection.appendChild(
+      createReadAloudRangeRow({
+        label: "Volume",
+        min: 0,
+        max: 1,
+        step: 0.05,
+        value: readAloudSettings.volume,
+        unit: "",
+        onChange: (value) => updateReadAloudSettings({ volume: Number(value.toFixed(2)) }),
+        inputKey: "volume",
+        valueKey: "volumeValue"
+      })
+    );
+
+    const behaviorSection = createSettingsSection("Behavior");
+    behaviorSection.appendChild(
+      createReadAloudRangeRow({
+        label: "Phrase length",
+        min: 120,
+        max: 420,
+        step: 20,
+        value: readAloudSettings.chunkLength,
+        unit: "",
+        onChange: (value) => updateReadAloudSettings({ chunkLength: value }),
+        inputKey: "chunkLength",
+        valueKey: "chunkLengthValue"
+      })
+    );
+    const phraseNote = document.createElement("div");
+    phraseNote.className = "su-utility-note";
+    phraseNote.textContent = "Short: easier pause/stop. Long: smoother continuous reading.";
+    behaviorSection.appendChild(phraseNote);
+
+    container.appendChild(controlsSection);
+    container.appendChild(voiceSection);
+    container.appendChild(tuningSection);
+    container.appendChild(behaviorSection);
+
+    refreshReadAloudVoices();
+    updateReadAloudControls();
+    updatePanelState();
+
+    return container;
+  }
+
   function buildCustomInjectionSettings() {
     const container = document.createElement("div");
     container.className = "su-settings";
@@ -1090,6 +1587,15 @@
       onToggle: (value) => updateSiteToggle(SITE_READING_KEY, value)
     });
 
+    const readAloudUtility = createUtilityCard({
+      id: "read-aloud",
+      title: "Read Aloud",
+      description: "Read page content out loud with browser text-to-speech.",
+      note: "Uses selected text first, then detected page content.",
+      checked: lastReadAloudEnabled,
+      onToggle: (value) => updateSiteToggle(SITE_READ_ALOUD_KEY, value)
+    });
+
     const customUtility = createUtilityCard({
       id: "custom",
       title: "Custom CSS / JS",
@@ -1108,6 +1614,11 @@
       readingBody.appendChild(buildReadingSettings());
     }
 
+    const readAloudBody = readAloudUtility.querySelector(".su-utility-body");
+    if (readAloudBody) {
+      readAloudBody.appendChild(buildReadAloudSettings());
+    }
+
     const customBody = customUtility.querySelector(".su-utility-body");
     if (customBody) {
       customBody.appendChild(buildCustomInjectionSettings());
@@ -1115,6 +1626,7 @@
 
     utilities.appendChild(selectionUtility);
     utilities.appendChild(readingUtility);
+    utilities.appendChild(readAloudUtility);
     utilities.appendChild(customUtility);
 
     content.appendChild(sectionTitle);
@@ -1318,6 +1830,14 @@
         align-items: center;
       }
 
+      .su-settings-row > * {
+        min-width: 0;
+      }
+
+      .su-settings-row--fill {
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      }
+
       .su-settings-row--range {
         grid-template-columns: 1fr auto;
       }
@@ -1338,12 +1858,16 @@
       }
 
       .su-settings-select {
+        width: 100%;
+        min-width: 0;
+        max-width: 100%;
         background: #171d24;
         color: #e6eef7;
         border: 1px solid #2f3a46;
         border-radius: 8px;
         padding: 4px 6px;
         font-size: 11px;
+        box-sizing: border-box;
       }
 
       .su-settings-button {
@@ -1358,6 +1882,17 @@
 
       .su-settings-button:hover {
         background: #1f2630;
+      }
+
+      .su-settings-button:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+      }
+
+      .su-settings-actions {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 6px;
       }
 
       .su-settings-textarea {
@@ -1507,7 +2042,11 @@
   }
 
   function updateSiteToggle(key, value) {
-    const map = key === SITE_SELECTION_KEY ? { ...siteSelectionMap } : { ...siteReadingMap };
+    let map;
+    if (key === SITE_SELECTION_KEY) map = { ...siteSelectionMap };
+    else if (key === SITE_READING_KEY) map = { ...siteReadingMap };
+    else if (key === SITE_READ_ALOUD_KEY) map = { ...siteReadAloudMap };
+    else return;
     map[hostname] = value;
     if (isExtensionContextValid()) {
       chrome.storage.local.set({ [key]: map });
@@ -1593,16 +2132,27 @@
         ? siteReadingMap[hostname]
         : defaultReadingEnabled;
 
+    const readAloudValue =
+      Object.prototype.hasOwnProperty.call(siteReadAloudMap, hostname)
+        ? siteReadAloudMap[hostname]
+        : defaultReadAloudEnabled;
+
     const customValue = Object.prototype.hasOwnProperty.call(siteCustomMap, hostname)
       ? siteCustomMap[hostname]
       : customState;
 
-    if (selectionValue === true || readingValue === true || customValue?.enabled === true) {
+    if (
+      selectionValue === true ||
+      readingValue === true ||
+      readAloudValue === true ||
+      customValue?.enabled === true
+    ) {
       setPanelVisible(true);
     }
 
     setSelectionEnabled(selectionValue === true);
     setReadingModeEnabled(readingValue === true);
+    setReadAloudEnabled(readAloudValue === true);
     if (customValue) applyCustomState(customValue);
   }
 
@@ -1614,20 +2164,30 @@
         READING_MODE_KEY,
         DEFAULT_SELECTION_KEY,
         DEFAULT_READING_KEY,
+        DEFAULT_READ_ALOUD_KEY,
         SITE_SELECTION_KEY,
         SITE_READING_KEY,
+        SITE_READ_ALOUD_KEY,
         READER_SETTINGS_KEY,
+        READ_ALOUD_SETTINGS_KEY,
         SITE_CUSTOM_KEY
       ],
       (result) => {
         if (!isExtensionContextValid()) return;
         defaultSelectionEnabled = result[DEFAULT_SELECTION_KEY] === true;
         defaultReadingEnabled = result[DEFAULT_READING_KEY] === true;
+        defaultReadAloudEnabled = result[DEFAULT_READ_ALOUD_KEY] === true;
         siteSelectionMap = result[SITE_SELECTION_KEY] || {};
         siteReadingMap = result[SITE_READING_KEY] || {};
+        siteReadAloudMap = result[SITE_READ_ALOUD_KEY] || {};
         siteCustomMap = result[SITE_CUSTOM_KEY] || {};
         readerSettings = { ...DEFAULT_READER_SETTINGS, ...(result[READER_SETTINGS_KEY] || {}) };
+        readAloudSettings = {
+          ...DEFAULT_READ_ALOUD_SETTINGS,
+          ...(result[READ_ALOUD_SETTINGS_KEY] || {})
+        };
         applyReaderSettings();
+        refreshReadAloudVoices();
 
         if (Object.keys(siteSelectionMap).length === 0 && result[STORAGE_KEY] === true) {
           siteSelectionMap[hostname] = true;
@@ -1674,6 +2234,11 @@
     ensurePanel();
     loadState();
     window.addEventListener("message", handleCustomJsResult);
+    if (canUseReadAloud()) {
+      refreshReadAloudVoices();
+      window.speechSynthesis.addEventListener("voiceschanged", refreshReadAloudVoices);
+    }
+    window.addEventListener("beforeunload", stopReadAloud);
 
     if (isExtensionContextValid()) {
       chrome.storage.onChanged.addListener((changes, areaName) => {
@@ -1690,29 +2255,48 @@
           shouldApply = true;
         }
 
+        if (DEFAULT_READ_ALOUD_KEY in changes) {
+          defaultReadAloudEnabled = changes[DEFAULT_READ_ALOUD_KEY].newValue === true;
+          shouldApply = true;
+        }
+
         if (SITE_SELECTION_KEY in changes) {
           siteSelectionMap = changes[SITE_SELECTION_KEY].newValue || {};
           shouldApply = true;
         }
 
-      if (SITE_READING_KEY in changes) {
-        siteReadingMap = changes[SITE_READING_KEY].newValue || {};
-        shouldApply = true;
-      }
+        if (SITE_READING_KEY in changes) {
+          siteReadingMap = changes[SITE_READING_KEY].newValue || {};
+          shouldApply = true;
+        }
 
-      if (SITE_CUSTOM_KEY in changes) {
-        siteCustomMap = changes[SITE_CUSTOM_KEY].newValue || {};
-        const nextCustom = siteCustomMap[hostname] || customState;
-        applyCustomState(nextCustom);
-      }
+        if (SITE_READ_ALOUD_KEY in changes) {
+          siteReadAloudMap = changes[SITE_READ_ALOUD_KEY].newValue || {};
+          shouldApply = true;
+        }
 
-      if (READER_SETTINGS_KEY in changes) {
-        readerSettings = {
-          ...DEFAULT_READER_SETTINGS,
-          ...(changes[READER_SETTINGS_KEY].newValue || {})
-        };
+        if (SITE_CUSTOM_KEY in changes) {
+          siteCustomMap = changes[SITE_CUSTOM_KEY].newValue || {};
+          const nextCustom = siteCustomMap[hostname] || customState;
+          applyCustomState(nextCustom);
+        }
+
+        if (READER_SETTINGS_KEY in changes) {
+          readerSettings = {
+            ...DEFAULT_READER_SETTINGS,
+            ...(changes[READER_SETTINGS_KEY].newValue || {})
+          };
           applyReaderSettings();
           if (lastReadingModeEnabled) scheduleReaderRebuild();
+        }
+
+        if (READ_ALOUD_SETTINGS_KEY in changes) {
+          readAloudSettings = {
+            ...DEFAULT_READ_ALOUD_SETTINGS,
+            ...(changes[READ_ALOUD_SETTINGS_KEY].newValue || {})
+          };
+          refreshReadAloudVoices();
+          updateReadAloudControls();
         }
 
         if (shouldApply) applyStoredState();

@@ -6,8 +6,10 @@ const READING_MODE_KEY = "swiss_utility_reading_mode";
 const PANEL_VISIBLE_KEY = "swiss_utility_panel_visible";
 const DEFAULT_SELECTION_KEY = "swiss_utility_default_selection";
 const DEFAULT_READING_KEY = "swiss_utility_default_reading";
+const DEFAULT_READ_ALOUD_KEY = "swiss_utility_default_read_aloud";
 const SITE_SELECTION_KEY = "swiss_utility_site_selection";
 const SITE_READING_KEY = "swiss_utility_site_reading";
+const SITE_READ_ALOUD_KEY = "swiss_utility_site_read_aloud";
 
 function log(...args) {
   console.log(PREFIX, ...args);
@@ -21,8 +23,10 @@ chrome.runtime.onInstalled.addListener(() => {
     [PANEL_VISIBLE_KEY]: false,
     [DEFAULT_SELECTION_KEY]: false,
     [DEFAULT_READING_KEY]: false,
+    [DEFAULT_READ_ALOUD_KEY]: false,
     [SITE_SELECTION_KEY]: {},
-    [SITE_READING_KEY]: {}
+    [SITE_READING_KEY]: {},
+    [SITE_READ_ALOUD_KEY]: {}
   });
 });
 

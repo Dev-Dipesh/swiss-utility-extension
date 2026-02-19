@@ -2,7 +2,7 @@
   "name": "Swiss Utility",
   "version": "0.1.0",
   "manifest_version": 3,
-  "description": "Small targeted utilities. First: enable right-click and text selection/copy on any website.",
+  "description": "Small targeted utilities: right-click/select unlock, reading mode, and read aloud.",
   "icons": {
     "16": "icons/icon-16.png",
     "32": "icons/icon-32.png",
